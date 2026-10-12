@@ -1,0 +1,52 @@
+name: Wedstrijden ophalen
+
+# Rekensom (max. 100 API-calls per dag bij API-Football):
+#   speelvenster: elke 10 min van 09:00 tot 21:50 UTC = 78 runs × max. 1 call (alleen 'vandaag',
+#                 en alleen als er een wedstrijd bezig is of binnen 15 min begint)          = max. 78
+#   dag-runs:     00:15, 03:15 en 06:15 UTC × max. 3 calls (gisteren, vandaag, morgen)      = max.  9
+#   totaal                                                                                  = max. 87
+# Het script stopt bovendien hard bij 90 calls per dag. Rest blijft over voor stadions.py.
+on:
+  schedule:
+    - cron: "*/10 9-21 * * *"
+    - cron: "15 0,3,6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Nooit twee runs tegelijk (dan zouden ze elkaars website overschrijven)
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  ophalen:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: fetch
+        name: Wedstrijden ophalen bij API-Football
+        run: python3 scripts/haal_wedstrijden.py
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          MODE: ${{ github.event.schedule == '*/10 9-21 * * *' && 'live' || (github.event.schedule && 'dag' || 'alles') }}
+
+      - if: steps.fetch.outputs.changed == 'true'
+        uses: actions/configure-pages@v5
+
+      - if: steps.fetch.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - if: steps.fetch.outputs.changed == 'true'
+        id: deploy
+        uses: actions/deploy-pages@v4
