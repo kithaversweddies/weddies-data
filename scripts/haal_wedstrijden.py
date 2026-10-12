@@ -6,8 +6,12 @@ Haalt bij API-Football de wedstrijden van gisteren, vandaag en morgen op, houdt 
 uit competities.json over en schrijft ze naar site/ (dat wordt via GitHub Pages online gezet):
 
   site/index.json                    wanneer wat is bijgewerkt + API-tellerstand
-  site/fixtures/<yyyy-mm-dd>.json    {"errors": [], "response": [...]} – zelfde vorm als API-Football
+  site/wedstrijden/<yyyy-mm-dd>.json alleen wat de app nodig heeft, in Weddies' eigen compacte formaat
+                                     (zie compact() en README.md)
   site/seizoen.json                  clubs per competitie in het huidige seizoen (voor het paspoort)
+
+Overgang: zolang OUDE_BESTANDEN aan staat, komen er ook nog de ruwe API-Football-bestanden
+site/fixtures/<yyyy-mm-dd>.json bij, voor app-versies die het nieuwe formaat nog niet kennen.
 
 Zuinig met de 100 calls per dag:
 - 'live'-runs (elke 10 min overdag) halen alleen vandaag op, en alleen als er een wedstrijd bezig is
@@ -18,9 +22,11 @@ Zuinig met de 100 calls per dag:
 Omdat GitHub Pages bij elke run helemaal opnieuw wordt neergezet, leest het script eerst de vorige versie
 van de website in en neemt het de bestanden over die het niet opnieuw ophaalt.
 
-Omgevingsvariabelen: API_FOOTBALL_KEY (GitHub Secret), PAGES_URL, MODE (live/dag/alles), SITE_DIR.
+Omgevingsvariabelen: API_FOOTBALL_KEY (GitHub Secret), PAGES_URL, MODE (live/dag/alles/herbouw), SITE_DIR.
+'herbouw' haalt niets op bij de API (0 calls) en zet alleen de bestanden opnieuw neer.
 """
 
+import html
 import json
 import os
 import sys
@@ -37,6 +43,8 @@ MIN_REMAINING = 10    # stoppen als API-Football minder dan dit over meldt
 KEEP_DAYS = 7         # zoveel dagen terug blijven online staan
 LIVE = {"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "SUSP"}
 DONE = {"FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"}
+FORMAAT = 1           # versie van het compacte formaat; ophogen bij een verandering die oude apps breekt
+OUDE_BESTANDEN = True # tijdelijk: ook de ruwe fixtures/<datum>.json neerzetten (overgang naar het nieuwe formaat)
 
 ROOT = Path(__file__).resolve().parent.parent
 SITE = Path(os.environ.get("SITE_DIR", ROOT / "site"))
@@ -50,24 +58,54 @@ def get_json(url, headers=None):
 
 
 def previous_site(pages_url):
-    """De vorige versie van de website: index, dagbestanden en seizoen (leeg bij de allereerste run)."""
+    """De vorige versie van de website: index, dagen (compact), ruwe dagen (overgang) en seizoen.
+    Staat een dag nog niet in het compacte formaat online, dan wordt de ruwe versie omgezet."""
     if not pages_url:
-        return {}, {}, {}
-    try:
-        index, _ = get_json(f"{pages_url}/index.json?t={int(datetime.now().timestamp())}")
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-        return {}, {}, {}
-    try:
-        season, _ = get_json(f"{pages_url}/seizoen.json?t={int(datetime.now().timestamp())}")
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-        season = {}
-    days = {}
-    for day in index.get("dagen", {}):
+        return {}, {}, {}, {}
+    stamp = int(datetime.now().timestamp())
+
+    def fetch(path):
         try:
-            days[day], _ = get_json(f"{pages_url}/fixtures/{day}.json?t={int(datetime.now().timestamp())}")
+            return get_json(f"{pages_url}/{path}?t={stamp}")[0]
         except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-            pass
-    return index, days, season
+            return None
+
+    index = fetch("index.json")
+    if index is None:
+        return {}, {}, {}, {}
+    season = fetch("seizoen.json") or {}
+    days, raw = {}, {}
+    for day in index.get("dagen", {}):
+        if OUDE_BESTANDEN and (old := fetch(f"fixtures/{day}.json")) is not None:
+            raw[day] = old
+        new = fetch(f"wedstrijden/{day}.json")
+        if new is None and day in raw:
+            new = compact(raw[day], day)
+        if new is not None:
+            days[day] = new
+    return index, days, raw, season
+
+
+def compact(api_data, day):
+    """API-Football-antwoord -> Weddies' eigen formaat: alleen wat de app en stadions.py gebruiken.
+    Logo's staan er niet in; die liggen vast per ID (media.api-sports.io/football/teams|leagues/<id>.png).
+    Lege velden (geen minuut, stand, stadion of plaats) worden weggelaten."""
+    comps, matches = {}, []
+    for f in api_data.get("response", []):
+        fx, lg, teams, goals = f["fixture"], f["league"], f["teams"], f.get("goals") or {}
+        comps.setdefault(str(lg["id"]), {"naam": lg["name"], "land": lg["country"], "seizoen": lg.get("season")})
+        m = {"id": fx["id"], "competitie": lg["id"], "ronde": lg.get("round"), "aftrap": fx["date"],
+             "status": fx["status"]["short"], "minuut": fx["status"].get("elapsed"),
+             "thuis": {"id": teams["home"]["id"], "naam": html.unescape(teams["home"]["name"])},
+             "uit": {"id": teams["away"]["id"], "naam": html.unescape(teams["away"]["name"])}}
+        if goals.get("home") is not None or goals.get("away") is not None:
+            m["stand"] = [goals.get("home"), goals.get("away")]
+        venue = fx.get("venue") or {}
+        m["stadion"] = html.unescape(venue.get("name") or "") or None
+        m["plaats"] = html.unescape(venue.get("city") or "") or None
+        matches.append({k: v for k, v in m.items() if v is not None})
+    matches.sort(key=lambda m: (m["aftrap"], m["id"]))
+    return {"formaat": FORMAAT, "datum": day, "competities": comps, "wedstrijden": matches}
 
 
 def update_season(season, day_files):
@@ -76,23 +114,23 @@ def update_season(season, day_files):
     (op hooguit één na, vanwege een vrije ronde) speelden."""
     comps = season.setdefault("competities", {})
     for data in day_files:
-        for f in data.get("response", []):
-            lg = f["league"]
-            key, year = str(lg["id"]), lg.get("season") or 0
+        for m in data.get("wedstrijden", []):
+            lg = data["competities"][str(m["competitie"])]
+            key, year = str(m["competitie"]), lg.get("seizoen") or 0
             comp = comps.get(key)
             if comp is None or year > comp["seizoen"]:
-                comp = comps[key] = {"naam": lg["name"], "land": lg["country"], "seizoen": year,
+                comp = comps[key] = {"naam": lg["naam"], "land": lg["land"], "seizoen": year,
                                      "clubs": {}, "rondes": {}}
             elif year < comp["seizoen"]:
                 continue  # wedstrijd uit een vorig seizoen
-            home, away = f["teams"]["home"], f["teams"]["away"]
-            comp["clubs"][str(home["id"])] = home["name"]
-            comp["clubs"][str(away["id"])] = away["name"]
-            rnd = lg.get("round") or "?"
+            home, away = m["thuis"], m["uit"]
+            comp["clubs"][str(home["id"])] = home["naam"]
+            comp["clubs"][str(away["id"])] = away["naam"]
+            rnd = m.get("ronde") or "?"
             comp["rondes"][rnd] = sorted(set(comp["rondes"].get(rnd, [])) | {home["id"], away["id"]})
-            weekday = datetime.fromisoformat(f["fixture"]["date"]).weekday()
+            weekday = datetime.fromisoformat(m["aftrap"]).weekday()
             pairs = comp.setdefault("paren", {})
-            pairs[str(f["fixture"]["id"])] = [home["id"], away["id"], weekday]
+            pairs[str(m["id"])] = [home["id"], away["id"], weekday]
     for comp in comps.values():
         comp["groepen"] = split_groups(comp)
     return season
@@ -146,9 +184,9 @@ def fetch_day(day, key):
     data, headers = get_json(f"{API}?date={day}&timezone=Europe/Amsterdam", {"x-apisports-key": key})
     if data.get("errors"):
         raise RuntimeError(f"API-Football: {data['errors']}")
-    ours = [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]
+    ours = {"errors": [], "response": [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]}
     remaining = headers.get("x-ratelimit-requests-remaining")
-    return {"errors": [], "response": ours}, int(remaining) if remaining and remaining.isdigit() else None
+    return ours, int(remaining) if remaining and remaining.isdigit() else None
 
 
 def needs_live_refresh(day_data, fetched_at, now):
@@ -157,11 +195,11 @@ def needs_live_refresh(day_data, fetched_at, now):
         return True
     if now - fetched_at > timedelta(hours=3):
         return True
-    for f in day_data.get("response", []):
-        status = f["fixture"]["status"]["short"]
+    for m in day_data.get("wedstrijden", []):
+        status = m["status"]
         if status in LIVE:
             return True
-        kickoff = datetime.fromisoformat(f["fixture"]["date"])
+        kickoff = datetime.fromisoformat(m["aftrap"])
         if status not in DONE and kickoff - timedelta(minutes=15) <= now <= kickoff + timedelta(hours=3):
             return True
     return False
@@ -172,19 +210,19 @@ def is_final(day_data, fetched_at, day):
     if day_data is None or fetched_at is None:
         return False
     day_end = datetime.fromisoformat(day).replace(tzinfo=TZ) + timedelta(days=1, hours=1)
-    return fetched_at >= day_end and all(f["fixture"]["status"]["short"] in DONE for f in day_data["response"])
+    return fetched_at >= day_end and all(m["status"] in DONE for m in day_data["wedstrijden"])
 
 
 def main():
     key = os.environ.get("API_FOOTBALL_KEY", "")
-    if not key:
-        sys.exit("API_FOOTBALL_KEY ontbreekt (GitHub Secret).")
     mode = os.environ.get("MODE", "alles")
+    if not key and mode != "herbouw":
+        sys.exit("API_FOOTBALL_KEY ontbreekt (GitHub Secret).")
     now = datetime.now(TZ)
     today = now.date()
     dates = {"gisteren": str(today - timedelta(days=1)), "vandaag": str(today), "morgen": str(today + timedelta(days=1))}
 
-    index, days, season = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
+    index, days, raw, season = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
     had_season = bool(season.get("competities"))
     fetched = {d: datetime.fromisoformat(t) for d, t in index.get("dagen", {}).items()}
 
@@ -201,6 +239,8 @@ def main():
         if not is_final(days.get(dates["gisteren"]), fetched.get(dates["gisteren"]), dates["gisteren"]):
             wanted.append(dates["gisteren"])
         wanted += [dates["vandaag"], dates["morgen"]]
+    elif mode == "herbouw":
+        wanted = []
     else:
         wanted = list(dates.values())
 
@@ -210,24 +250,33 @@ def main():
             print(f"Grens bereikt ({calls} calls vandaag, nog {remaining} over): {day} overgeslagen")
             break
         try:
-            days[day], left = fetch_day(day, key)
+            raw[day], left = fetch_day(day, key)
         except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
             print(f"{day}: niet gelukt ({e})")
             continue
+        days[day] = compact(raw[day], day)
         calls += 1
         remaining = left if left is not None else remaining
         fetched[day] = now
         done.append(day)
-        print(f"{day}: {len(days[day]['response'])} wedstrijden")
+        print(f"{day}: {len(days[day]['wedstrijden'])} wedstrijden")
 
     # Alleen de laatste KEEP_DAYS dagen (en morgen) online houden
     oldest = str(today - timedelta(days=KEEP_DAYS))
     keep = sorted(d for d in days if oldest <= d <= dates["morgen"] and d in fetched)
 
-    (SITE / "fixtures").mkdir(parents=True, exist_ok=True)
+    (SITE / "wedstrijden").mkdir(parents=True, exist_ok=True)
     for day in keep:
-        (SITE / "fixtures" / f"{day}.json").write_text(json.dumps(days[day], separators=(",", ":")), encoding="utf-8")
+        (SITE / "wedstrijden" / f"{day}.json").write_text(
+            json.dumps(days[day], ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    if OUDE_BESTANDEN:
+        (SITE / "fixtures").mkdir(parents=True, exist_ok=True)
+        for day in keep:
+            if day in raw:
+                (SITE / "fixtures" / f"{day}.json").write_text(json.dumps(raw[day], separators=(",", ":")),
+                                                              encoding="utf-8")
     new_index = {
+        "formaat": FORMAAT,
         "bijgewerkt": now.isoformat(timespec="seconds"),
         "dagen": {d: fetched[d].isoformat(timespec="seconds") for d in keep},
         "calls_dag": utc_day,
@@ -238,16 +287,16 @@ def main():
     (SITE / "index.json").write_text(json.dumps(new_index, indent=1), encoding="utf-8")
 
     # Seizoen: vorige stand + startset uit de repo (seed/) + alle dagen die nu online staan
-    seeds = [json.loads(p.read_text()) for p in sorted((ROOT / "seed").glob("dag-*.json"))]
+    seeds = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((ROOT / "seed").glob("dag-*.json"))]
     season = update_season(season, seeds + [days[d] for d in keep])
     season["bijgewerkt"] = now.isoformat(timespec="seconds")
-    (SITE / "seizoen.json").write_text(json.dumps(season, separators=(",", ":")), encoding="utf-8")
+    (SITE / "seizoen.json").write_text(json.dumps(season, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     (SITE / ".nojekyll").write_text("", encoding="utf-8")
 
     print(f"Modus {mode}: {len(done)} dag(en) opgehaald, {calls} calls vandaag, nog {remaining} over")
     if gh_output := os.environ.get("GITHUB_OUTPUT"):
         with open(gh_output, "a") as f:
-            f.write(f"changed={'true' if done or not index or not had_season else 'false'}\n")
+            f.write(f"changed={'true' if done or not index or not had_season or mode == 'herbouw' else 'false'}\n")
 
 
 if __name__ == "__main__":

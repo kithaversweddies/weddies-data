@@ -11,6 +11,12 @@ on:
     - cron: "*/10 9-21 * * *"
     - cron: "15 0,3,6 * * *"
   workflow_dispatch:
+    inputs:
+      modus:
+        description: "alles = gisteren/vandaag/morgen ophalen (3 calls); herbouw = niets ophalen, alleen opnieuw neerzetten (0 calls)"
+        default: alles
+        type: choice
+        options: [alles, herbouw]
 
 permissions:
   contents: read
@@ -37,7 +43,7 @@ jobs:
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-          MODE: ${{ github.event.schedule == '*/10 9-21 * * *' && 'live' || (github.event.schedule && 'dag' || 'alles') }}
+          MODE: ${{ github.event.schedule == '*/10 9-21 * * *' && 'live' || (github.event.schedule && 'dag' || inputs.modus || 'alles') }}
 
       - if: steps.fetch.outputs.changed == 'true'
         uses: actions/configure-pages@v5
