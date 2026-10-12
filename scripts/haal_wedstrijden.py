@@ -10,8 +10,7 @@ uit competities.json over en schrijft ze naar site/ (dat wordt via GitHub Pages 
                                      (zie compact() en README.md)
   site/seizoen.json                  clubs per competitie in het huidige seizoen (voor het paspoort)
 
-Overgang: zolang OUDE_BESTANDEN aan staat, komen er ook nog de ruwe API-Football-bestanden
-site/fixtures/<yyyy-mm-dd>.json bij, voor app-versies die het nieuwe formaat nog niet kennen.
+De ruwe API-Football-data gaat niet online; alleen het compacte formaat.
 
 Zuinig met de 100 calls per dag:
 - 'live'-runs (elke 10 min overdag) halen alleen vandaag op, en alleen als er een wedstrijd bezig is
@@ -44,7 +43,6 @@ KEEP_DAYS = 7         # zoveel dagen terug blijven online staan
 LIVE = {"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "SUSP"}
 DONE = {"FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"}
 FORMAAT = 1           # versie van het compacte formaat; ophogen bij een verandering die oude apps breekt
-OUDE_BESTANDEN = True # tijdelijk: ook de ruwe fixtures/<datum>.json neerzetten (overgang naar het nieuwe formaat)
 
 ROOT = Path(__file__).resolve().parent.parent
 SITE = Path(os.environ.get("SITE_DIR", ROOT / "site"))
@@ -58,10 +56,9 @@ def get_json(url, headers=None):
 
 
 def previous_site(pages_url):
-    """De vorige versie van de website: index, dagen (compact), ruwe dagen (overgang) en seizoen.
-    Staat een dag nog niet in het compacte formaat online, dan wordt de ruwe versie omgezet."""
+    """De vorige versie van de website: index, dagen en seizoen (leeg bij de allereerste run)."""
     if not pages_url:
-        return {}, {}, {}, {}
+        return {}, {}, {}
     stamp = int(datetime.now().timestamp())
 
     def fetch(path):
@@ -72,18 +69,9 @@ def previous_site(pages_url):
 
     index = fetch("index.json")
     if index is None:
-        return {}, {}, {}, {}
-    season = fetch("seizoen.json") or {}
-    days, raw = {}, {}
-    for day in index.get("dagen", {}):
-        if OUDE_BESTANDEN and (old := fetch(f"fixtures/{day}.json")) is not None:
-            raw[day] = old
-        new = fetch(f"wedstrijden/{day}.json")
-        if new is None and day in raw:
-            new = compact(raw[day], day)
-        if new is not None:
-            days[day] = new
-    return index, days, raw, season
+        return {}, {}, {}
+    days = {day: data for day in index.get("dagen", {}) if (data := fetch(f"wedstrijden/{day}.json")) is not None}
+    return index, days, fetch("seizoen.json") or {}
 
 
 def compact(api_data, day):
@@ -181,12 +169,13 @@ def split_groups(comp):
 
 
 def fetch_day(day, key):
+    """Eén dag bij API-Football ophalen, direct omgezet naar het compacte formaat."""
     data, headers = get_json(f"{API}?date={day}&timezone=Europe/Amsterdam", {"x-apisports-key": key})
     if data.get("errors"):
         raise RuntimeError(f"API-Football: {data['errors']}")
-    ours = {"errors": [], "response": [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]}
+    ours = {"response": [f for f in data.get("response", []) if f["league"]["id"] in LEAGUES]}
     remaining = headers.get("x-ratelimit-requests-remaining")
-    return ours, int(remaining) if remaining and remaining.isdigit() else None
+    return compact(ours, day), int(remaining) if remaining and remaining.isdigit() else None
 
 
 def needs_live_refresh(day_data, fetched_at, now):
@@ -222,7 +211,7 @@ def main():
     today = now.date()
     dates = {"gisteren": str(today - timedelta(days=1)), "vandaag": str(today), "morgen": str(today + timedelta(days=1))}
 
-    index, days, raw, season = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
+    index, days, season = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
     had_season = bool(season.get("competities"))
     fetched = {d: datetime.fromisoformat(t) for d, t in index.get("dagen", {}).items()}
 
@@ -250,11 +239,10 @@ def main():
             print(f"Grens bereikt ({calls} calls vandaag, nog {remaining} over): {day} overgeslagen")
             break
         try:
-            raw[day], left = fetch_day(day, key)
+            days[day], left = fetch_day(day, key)
         except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
             print(f"{day}: niet gelukt ({e})")
             continue
-        days[day] = compact(raw[day], day)
         calls += 1
         remaining = left if left is not None else remaining
         fetched[day] = now
@@ -269,12 +257,6 @@ def main():
     for day in keep:
         (SITE / "wedstrijden" / f"{day}.json").write_text(
             json.dumps(days[day], ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    if OUDE_BESTANDEN:
-        (SITE / "fixtures").mkdir(parents=True, exist_ok=True)
-        for day in keep:
-            if day in raw:
-                (SITE / "fixtures" / f"{day}.json").write_text(json.dumps(raw[day], separators=(",", ":")),
-                                                              encoding="utf-8")
     new_index = {
         "formaat": FORMAAT,
         "bijgewerkt": now.isoformat(timespec="seconds"),
@@ -291,7 +273,6 @@ def main():
     season = update_season(season, seeds + [days[d] for d in keep])
     season["bijgewerkt"] = now.isoformat(timespec="seconds")
     (SITE / "seizoen.json").write_text(json.dumps(season, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    (SITE / ".nojekyll").write_text("", encoding="utf-8")
 
     print(f"Modus {mode}: {len(done)} dag(en) opgehaald, {calls} calls vandaag, nog {remaining} over")
     if gh_output := os.environ.get("GITHUB_OUTPUT"):
