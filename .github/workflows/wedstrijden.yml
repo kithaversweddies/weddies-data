@@ -1,22 +1,22 @@
 name: Wedstrijden ophalen
 
-# Rekensom (max. 100 API-calls per dag bij API-Football):
-#   speelvenster: elke 10 min van 09:00 tot 21:50 UTC = 78 runs × max. 1 call (alleen 'vandaag',
-#                 en alleen als er een wedstrijd bezig is of binnen 15 min begint)          = max. 78
-#   dag-runs:     00:15, 03:15 en 06:15 UTC × max. 3 calls (gisteren, vandaag, morgen)      = max.  9
-#   totaal                                                                                  = max. 87
-# Het script stopt bovendien hard bij 90 calls per dag. Rest blijft over voor stadions.py.
+# Rekensom (Pro-plan: 7.500 calls per dag, 300 per minuut):
+#   live:    elke 5 min van 09:00 tot 22:55 UTC = 168 runs × max. 1 call (alleen als er iets bezig is
+#            of binnen 15 min begint; anders 0)                                                  = max. 168
+#   seizoen: elke 3 uur (:22) × ±39 calls (hele seizoen van alle 38 competities)                 = ±  312
+#   totaal                                                                                        = ±  480
+# Het script stopt hard bij 2.500 calls per dag, of als API-Football minder dan 1.500 over meldt.
 on:
   schedule:
-    - cron: "*/10 9-21 * * *"
-    - cron: "15 0,3,6 * * *"
+    - cron: "*/5 9-22 * * *"
+    - cron: "22 */3 * * *"
   workflow_dispatch:
     inputs:
       modus:
-        description: "alles = gisteren/vandaag/morgen ophalen (3 calls); herbouw = niets ophalen, alleen opnieuw neerzetten (0 calls)"
+        description: "alles = hele seizoen ophalen (±39 calls); live = alleen vandaag (1 call); herbouw = niets ophalen, alleen opnieuw neerzetten (0 calls)"
         default: alles
         type: choice
-        options: [alles, herbouw]
+        options: [alles, live, herbouw]
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
-          MODE: ${{ github.event.schedule == '*/10 9-21 * * *' && 'live' || (github.event.schedule && 'dag' || inputs.modus || 'alles') }}
+          MODE: ${{ github.event.schedule == '*/5 9-22 * * *' && 'live' || (github.event.schedule && 'seizoen' || inputs.modus || 'alles') }}
 
       - if: steps.fetch.outputs.changed == 'true'
         uses: actions/configure-pages@v6

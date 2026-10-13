@@ -1,12 +1,15 @@
 # weddies-data
 
-Wedstrijddata voor de Weddies-app. Een GitHub Action haalt de wedstrijden van gisteren, vandaag en morgen op bij
-[API-Football](https://www.api-football.com) en zet via GitHub Pages alleen online wat de app nodig heeft, in een
-eigen compact formaat:
+Wedstrijddata voor de Weddies-app. Een GitHub Action haalt het hele seizoen van de gevolgde competities op bij
+[API-Football](https://www.api-football.com) (Pro-plan) en zet via GitHub Pages alleen online wat de app nodig heeft,
+in een eigen compact formaat:
 
 - `index.json`: wanneer wat is bijgewerkt (en de API-tellerstand)
-- `wedstrijden/<yyyy-mm-dd>.json`: de wedstrijden van die dag (alleen de competities uit `competities.json`)
-- `seizoen.json`: clubs per competitie in het huidige seizoen
+- `wedstrijden/<yyyy-mm-dd>.json`: de wedstrijden van die dag, van 7 dagen terug tot 14 dagen vooruit
+- `competities/<id>.json`: het hele seizoen van één competitie (zelfde formaat; `datum` is dan het seizoensjaar)
+- `seizoen.json`: clubs per competitie in het huidige seizoen (met groepen, bv. Derde Divisie zaterdag)
+
+Het hele seizoen wordt elke 3 uur ververst; live standen van vandaag elke 5 minuten (alleen als er iets bezig is).
 
 De API-sleutel staat als GitHub Secret `API_FOOTBALL_KEY` in deze repository en zit niet in de app.
 Schema en rekensom: zie `.github/workflows/wedstrijden.yml`.
@@ -31,4 +34,3 @@ Schema en rekensom: zie `.github/workflows/wedstrijden.yml`.
 - Logo's staan er niet in: `https://media.api-sports.io/football/teams/<id>.png` en `.../leagues/<id>.png`.
 - `formaat` gaat omhoog bij een verandering die oudere app-versies niet meer kunnen lezen.
 
-`seed/` bevat een paar wedstrijddagen in hetzelfde formaat als startset voor `seizoen.json`.
