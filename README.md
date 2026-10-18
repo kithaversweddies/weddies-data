@@ -5,7 +5,7 @@ Wedstrijddata voor de Weddies-app. Een GitHub Action haalt het hele seizoen van 
 in een eigen compact formaat:
 
 - `index.json`: wanneer wat is bijgewerkt (en de API-tellerstand)
-- `wedstrijden/<yyyy-mm-dd>.json`: de wedstrijden van die dag, van 7 dagen terug tot 14 dagen vooruit
+- `wedstrijden/<yyyy-mm-dd>.json`: de wedstrijden van die dag, van 7 dagen terug tot 60 dagen vooruit
 - `competities/<id>.json`: het hele seizoen van één competitie (zelfde formaat; `datum` is dan het seizoensjaar)
 - `seizoen.json`: clubs per competitie in het huidige seizoen (met groepen, bv. Derde Divisie zaterdag)
 

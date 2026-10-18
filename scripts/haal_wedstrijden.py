@@ -7,7 +7,7 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
 (zie compact() en README.md):
 
   site/index.json                     wanneer wat is bijgewerkt + API-tellerstand
-  site/wedstrijden/<yyyy-mm-dd>.json  alle wedstrijden van die dag, van 7 dagen terug tot 14 dagen vooruit
+  site/wedstrijden/<yyyy-mm-dd>.json  alle wedstrijden van die dag, van 7 dagen terug tot 60 dagen vooruit
   site/competities/<id>.json          het hele seizoen van één competitie (voor de clubpagina)
   site/seizoen.json                   clubs per competitie in het huidige seizoen (voor het paspoort)
 
@@ -44,7 +44,7 @@ MIN_REMAINING = 1500    # stoppen als API-Football minder dan dit over meldt: re
 PER_MINUTE = 300        # limiet van het Pro-plan; het script blijft ruim onder de helft
 CALL_PAUSE = 0.4        # seconden tussen calls (≈150 per minuut)
 DAYS_BACK = 7           # zoveel dagen terug staan online
-DAYS_AHEAD = 14         # zoveel dagen vooruit staan online
+DAYS_AHEAD = 60         # zoveel dagen vooruit staan online (in de app: 7 gratis, tot 60 met Weddies Plus)
 LIVE = {"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "SUSP"}
 DONE = {"FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"}
 FORMAAT = 1             # versie van het compacte formaat; ophogen bij een verandering die oude apps breekt
