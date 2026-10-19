@@ -3,8 +3,10 @@ name: Wedstrijden ophalen
 # Rekensom (Pro-plan: 7.500 calls per dag, 300 per minuut):
 #   live:    elke 5 min van 09:00 tot 22:55 UTC = 168 runs × max. 1 call (alleen als er iets bezig is
 #            of binnen 15 min begint; anders 0)                                                  = max. 168
-#   seizoen: elke 3 uur (:22) × ±39 calls (hele seizoen van alle 38 competities)                 = ±  312
-#   totaal                                                                                        = ±  480
+#   seizoen: elke 3 uur (:22) × ±101 calls (hele seizoen van alle competities)                   = ±  808
+#   standen: alleen competities met een wedstrijd klaar sinds de vorige stand; op een drukke
+#            zaterdag ±3 runs × ±100, doordeweeks bijna niets                                     = ±0–300
+#   totaal                                                                                        = ±1.000–1.300
 # Het script stopt hard bij 2.500 calls per dag, of als API-Football minder dan 1.500 over meldt.
 on:
   schedule:

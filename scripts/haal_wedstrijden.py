@@ -10,10 +10,14 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
   site/wedstrijden/<yyyy-mm-dd>.json  alle wedstrijden van die dag, van 7 dagen terug tot 60 dagen vooruit
   site/competities/<id>.json          het hele seizoen van één competitie (voor de clubpagina)
   site/seizoen.json                   clubs per competitie in het huidige seizoen (voor het paspoort)
+  site/standen/<id>.json              de stand van één competitie, per poule (/standings, voor de clubpagina
+                                      en de positie op het wedstrijdkaartje)
 
 Modi (MODE):
 - 'seizoen' (elke 3 uur): per competitie het hele seizoen ophalen (/fixtures?league=..&season=..) plus één
   call voor de seizoensjaren (/leagues?current=true). ±39 calls. Hieruit worden alle bestanden gemaakt.
+  Daarna de stand (/standings) van elke competitie waar sinds de vorige stand een wedstrijd klaar is (of die
+  nog geen stand heeft): op speeldagen dus een paar keer per dag, doordeweeks bijna niets. ±0–39 calls.
 - 'live' (elke 5 minuten overdag): alleen vandaag (/fixtures?date=..), en alleen als er iets bezig is of
   binnen 15 minuten begint. 1 call. Zonder eerdere seizoensgegevens (eerste run) doet hij 'seizoen'.
 - 'alles': handmatig, zelfde als 'seizoen'. 'herbouw': niets ophalen, alleen opnieuw neerzetten (0 calls).
@@ -97,9 +101,9 @@ class Api:
 
 
 def previous_site(pages_url):
-    """De vorige versie van de website: index en het seizoen per competitie."""
+    """De vorige versie van de website: index, het seizoen per competitie en de standen."""
     if not pages_url:
-        return {}, {}
+        return {}, {}, {}
     stamp = int(datetime.now().timestamp())
 
     def fetch(path):
@@ -114,7 +118,12 @@ def previous_site(pages_url):
         data = fetch(f"competities/{lid}.json")
         if data is not None:
             leagues[int(lid)] = data
-    return index, leagues
+    standings = {}
+    for lid in index.get("standen", {}):
+        data = fetch(f"standen/{lid}.json")
+        if data is not None:
+            standings[int(lid)] = data
+    return index, leagues, standings
 
 
 def compact(api_data, day):
@@ -205,9 +214,8 @@ def split_groups(comp):
     return groups
 
 
-def fetch_season(api, leagues):
-    """Het hele seizoen van elke gevolgde competitie. Geeft {competitie-ID: compact bestand}."""
-    seasons = {}
+def fetch_season(api, leagues, seasons):
+    """Het hele seizoen van elke gevolgde competitie. Vult {competitie-ID: compact bestand} en {ID: seizoensjaar}."""
     for item in api.get("leagues", current="true")["response"]:
         lid = item["league"]["id"]
         if lid in LEAGUES:
@@ -227,6 +235,74 @@ def fetch_season(api, leagues):
             continue
         leagues[lid] = file
     return leagues
+
+
+def compact_standings(raw, lid, year, stamp):
+    """/standings -> Weddies' eigen formaat. Eén lijst per poule ('groep'): bij competities met meerdere poules
+    (bijv. de Regionalliga's of de Derde Divisie A/B) geeft API-Football meerdere tabellen. De punten zijn die van
+    API-Football (met eventuele puntenaftrek), niet zelf berekend."""
+    groups = []
+    for item in raw.get("response", []):
+        for table in (item.get("league") or {}).get("standings") or []:
+            rows = []
+            for r in table:
+                al = r.get("all") or {}
+                goals = al.get("goals") or {}
+                row = {"pos": r.get("rank"), "club": (r.get("team") or {}).get("id"),
+                       "naam": html.unescape((r.get("team") or {}).get("name") or ""),
+                       "g": al.get("played"), "w": al.get("win"), "gl": al.get("draw"), "v": al.get("lose"),
+                       "dv": goals.get("for"), "dt": goals.get("against"), "p": r.get("points"),
+                       "vorm": r.get("form") or None, "opm": r.get("description") or None}
+                rows.append({k: v for k, v in row.items() if v is not None})
+            name = html.unescape(table[0].get("group") or "") if table else ""
+            # Periodestanden (Eerste Divisie: 'Period 1' t/m 4) niet: alleen de echte stand
+            if not rows or "period" in name.lower():
+                continue
+            # Twee poules in één tabel (Derde Divisie A en B: posities 1–18 en dan weer 1–18): splitsen
+            part = [rows[0]]
+            for row in rows[1:]:
+                if row.get("pos", 0) <= part[-1].get("pos", 0):
+                    groups.append({"naam": name, "rijen": part})
+                    part = []
+                part.append(row)
+            groups.append({"naam": name, "rijen": part})
+    return {"formaat": FORMAAT, "competitie": lid, "seizoen": year, "bijgewerkt": stamp, "groepen": groups}
+
+
+def standings_due(lid, file, standings, now):
+    """Stand opnieuw ophalen? Als er nog geen is, of als sinds de vorige stand een wedstrijd klaar is. Een
+    wedstrijd telt als klaar ±2 uur na de aftrap (API-Football werkt de stand pas na het eindsignaal bij)."""
+    old = standings.get(lid)
+    if not old or not old.get("bijgewerkt"):
+        return True
+    last = datetime.fromisoformat(old["bijgewerkt"])
+    for m in file["wedstrijden"]:
+        if m["status"] in DONE:
+            done_at = datetime.fromisoformat(m["aftrap"]) + timedelta(hours=2)
+            if last < done_at <= now:
+                return True
+    return False
+
+
+def fetch_standings(api, leagues, seasons, standings, now):
+    """De stand van elke competitie waarvoor dat nodig is (zie standings_due)."""
+    fetched = 0
+    for lid in sorted(leagues):
+        year = seasons.get(lid)
+        if year is None or not standings_due(lid, leagues[lid], standings, now):
+            continue
+        try:
+            raw = api.get("standings", league=lid, season=year)
+        except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
+            print(f"stand {lid}: niet gelukt ({e})")
+            if isinstance(e, RuntimeError) and "grens" in str(e):
+                break
+            continue
+        file = compact_standings(raw, lid, year, now.isoformat(timespec="seconds"))
+        if file["groepen"]:  # geen stand (nog geen wedstrijden): de vorige laten staan
+            standings[lid] = file
+            fetched += 1
+    print(f"standen: {fetched} opgehaald")
 
 
 def all_matches(leagues):
@@ -298,7 +374,7 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    index, leagues = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
+    index, leagues, standings = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
     utc_day = str(datetime.now(timezone.utc).date())
     api = Api(key, index.get("calls", 0) if index.get("calls_dag") == utc_day else 0, None)
     if mode != "herbouw":
@@ -314,10 +390,12 @@ def main():
     try:
         if mode in ("seizoen", "alles"):
             before = len(leagues)
-            fetch_season(api, leagues)
+            seasons = {}
+            fetch_season(api, leagues, seasons)
             stamp = now.isoformat(timespec="seconds")
             fetched_leagues = {str(lid): stamp for lid in leagues}
             print(f"seizoen: {len(leagues)} competities ({len(leagues) - before} nieuw)")
+            fetch_standings(api, leagues, seasons, standings, now)
         elif mode == "live":
             days = [today]
             if now.hour < 2:
@@ -351,6 +429,8 @@ def main():
     for day in window:
         texts.append(write(SITE / "wedstrijden" / f"{day}.json", day_file(leagues, day)))
     texts.append(write(SITE / "seizoen.json", build_season(leagues.values())))
+    for lid, file in sorted(standings.items()):
+        texts.append(write(SITE / "standen" / f"{lid}.json", file))
     content = hashlib.sha1("".join(texts).encode()).hexdigest()
 
     new_index = {
@@ -359,6 +439,7 @@ def main():
         "dagen": {d: (live_fetched if d == str(today) and live_fetched else min(fetched_leagues.values(), default=""))
                   for d in window},
         "competities": fetched_leagues,
+        "standen": {str(lid): file.get("bijgewerkt") for lid, file in sorted(standings.items())},
         "live": live_fetched,
         "calls_dag": utc_day,
         "calls": api.calls,
