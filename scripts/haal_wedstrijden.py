@@ -12,6 +12,7 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
   site/seizoen.json                   clubs per competitie in het huidige seizoen (voor het paspoort)
   site/standen/<id>.json              de stand van één competitie, per poule (/standings, voor de clubpagina
                                       en de positie op het wedstrijdkaartje)
+  site/privacy.html, site/support.html  vaste pagina's uit pagina/ (privacybeleid en support voor de App Store)
 
 Modi (MODE):
 - 'seizoen' (elke 3 uur): per competitie het hele seizoen ophalen (/fixtures?league=..&season=..) plus één
@@ -431,6 +432,12 @@ def main():
     texts.append(write(SITE / "seizoen.json", build_season(leagues.values())))
     for lid, file in sorted(standings.items()):
         texts.append(write(SITE / "standen" / f"{lid}.json", file))
+    # Vaste pagina's (privacybeleid, support) uit pagina/: Pages wordt elke run helemaal vervangen, dus ze moeten
+    # elke keer mee. Ze tellen mee voor `inhoud`, zodat een aangepaste pagina ook online komt.
+    for page in sorted((ROOT / "pagina").glob("*.html")):
+        text = page.read_text(encoding="utf-8")
+        (SITE / page.name).write_text(text, encoding="utf-8")
+        texts.append(text)
     content = hashlib.sha1("".join(texts).encode()).hexdigest()
 
     new_index = {

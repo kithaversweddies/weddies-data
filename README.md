@@ -8,6 +8,7 @@ in een eigen compact formaat:
 - `wedstrijden/<yyyy-mm-dd>.json`: de wedstrijden van die dag, van 7 dagen terug tot 60 dagen vooruit
 - `competities/<id>.json`: het hele seizoen van één competitie (zelfde formaat; `datum` is dan het seizoensjaar)
 - `seizoen.json`: clubs per competitie in het huidige seizoen (met groepen, bv. Derde Divisie zaterdag)
+- `privacy.html` en `support.html`: het privacybeleid en de supportpagina van de app (bron: `pagina/`)
 
 Het hele seizoen wordt elke 3 uur ververst; live standen van vandaag elke 5 minuten (alleen als er iets bezig is).
 
