@@ -4,10 +4,11 @@ name: Wedstrijden ophalen
 #   live:    elke 5 min van 09:00 tot 22:55 UTC = 168 runs × max. 1 call (alleen als er iets bezig is
 #            of binnen 15 min begint; anders 0)                                                  = max. 168
 #   seizoen: elke 3 uur (:22) × ±101 calls (hele seizoen van alle competities)                   = ±  808
-#   standen: alleen competities met een wedstrijd klaar sinds de vorige stand; op een drukke
-#            zaterdag ±3 runs × ±100, doordeweeks bijna niets                                     = ±0–300
-#   totaal                                                                                        = ±1.000–1.300
-# Het script stopt hard bij 2.500 calls per dag, of als API-Football minder dan 1.500 over meldt.
+#   standen: alleen competities met een gespeelde wedstrijd in de laatste ±6 uur (API-Football werkt
+#            de stand soms laat bij); op een drukke zaterdag ±4 runs × ±100, doordeweeks weinig  = ±0–400
+#   totaal                                                                                        = ±1.000–1.400
+# Het script stopt als API-Football minder dan 1.500 over meldt (dat telt ook stadions.py mee), en na
+# 400 calls in één run.
 on:
   schedule:
     - cron: "*/5 9-22 * * *"
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       modus:
-        description: "alles = hele seizoen ophalen (±39 calls); live = alleen vandaag (1 call); herbouw = niets ophalen, alleen opnieuw neerzetten (0 calls)"
+        description: "alles = hele seizoen ophalen (±101 calls, plus standen); live = alleen vandaag (1 call); herbouw = niets ophalen, alleen opnieuw neerzetten (0 calls)"
         default: alles
         type: choice
         options: [alles, live, herbouw]

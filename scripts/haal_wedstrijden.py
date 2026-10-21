@@ -16,21 +16,25 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
 
 Modi (MODE):
 - 'seizoen' (elke 3 uur): per competitie het hele seizoen ophalen (/fixtures?league=..&season=..) plus één
-  call voor de seizoensjaren (/leagues?current=true). ±39 calls. Hieruit worden alle bestanden gemaakt.
-  Daarna de stand (/standings) van elke competitie waar sinds de vorige stand een wedstrijd klaar is (of die
-  nog geen stand heeft): op speeldagen dus een paar keer per dag, doordeweeks bijna niets. ±0–39 calls.
-- 'live' (elke 5 minuten overdag): alleen vandaag (/fixtures?date=..), en alleen als er iets bezig is of
-  binnen 15 minuten begint. 1 call. Zonder eerdere seizoensgegevens (eerste run) doet hij 'seizoen'.
+  call voor de seizoensjaren (/leagues?current=true). ±101 calls (100 competities). Hieruit worden alle
+  bestanden gemaakt. Daarna de stand (/standings) van elke competitie waar in de laatste uren een wedstrijd
+  klaar is (of die nog geen stand heeft): op speeldagen dus een paar keer per dag, doordeweeks bijna niets.
+  ±0–100 calls.
+- 'live' (elke 5 minuten overdag): alleen vandaag (en net na middernacht gisteren) (/fixtures?date=..), en alleen
+  als er iets bezig is of binnen 15 minuten begint. 1 call per dag. Zonder eerdere seizoensgegevens (eerste run)
+  doet hij 'seizoen'.
 - 'alles': handmatig, zelfde als 'seizoen'. 'herbouw': niets ophalen, alleen opnieuw neerzetten (0 calls).
 
 De vorige versie van de website (competities/<id>.json) is het geheugen tussen runs: GitHub Pages wordt elke
-keer helemaal vervangen. Er wordt alleen opnieuw neergezet als de inhoud echt veranderde.
+keer helemaal vervangen. Er wordt alleen opnieuw neergezet als de inhoud echt veranderde. Is de vorige site
+tijdelijk niet (helemaal) te lezen, dan stopt de run zonder iets neer te zetten (zie previous_site).
 
 Omgevingsvariabelen: API_FOOTBALL_KEY (GitHub Secret), PAGES_URL, MODE, SITE_DIR.
 """
 
 import hashlib
 import html
+import http.client
 import json
 import os
 import sys
@@ -44,14 +48,25 @@ from zoneinfo import ZoneInfo
 
 API = "https://v3.football.api-sports.io"
 TZ = ZoneInfo("Europe/Amsterdam")
-MAX_CALLS = 2500        # per dag voor de Action (van de 7.500); normaal gebruik is ±500
+# Grenzen. Eerst was er ook een daggrens MAX_CALLS = 2500, geteld vanuit `calls` in de vorige index.json. Die index
+# gaat alleen online als de inhoud verandert, dus runs zonder wijziging (ook seizoensruns van ±101 calls) telden
+# niet mee en de grens deed niets (issue #4). Nu telt alleen wat API-Football zelf meldt, plus een grens per run
+# tegen een script dat op hol slaat. Normaal gebruik: ±800–1.300 per dag (zie de rekensom in de workflow).
 MIN_REMAINING = 1500    # stoppen als API-Football minder dan dit over meldt: reserve voor stadions.py en handwerk
+MAX_CALLS_PER_RUN = 400 # een seizoensrun met alle standen is ±200
 PER_MINUTE = 300        # limiet van het Pro-plan; het script blijft ruim onder de helft
 CALL_PAUSE = 0.4        # seconden tussen calls (≈150 per minuut)
 DAYS_BACK = 7           # zoveel dagen terug staan online
 DAYS_AHEAD = 60         # zoveel dagen vooruit staan online (in de app: 7 gratis, tot 60 met Weddies Plus)
 LIVE = {"1H", "HT", "2H", "ET", "BT", "P", "LIVE", "INT", "SUSP"}
 DONE = {"FT", "AET", "PEN", "PST", "CANC", "ABD", "AWD", "WO"}
+PLAYED = {"FT", "AET", "PEN", "AWD", "WO"}  # telt mee in de stand (uitgesteld, afgelast en gestaakt niet)
+STANDINGS_AFTER = timedelta(hours=2)  # een wedstrijd telt zoveel na de aftrap als klaar
+STANDINGS_FOLLOW_UP = timedelta(hours=6)  # en de stand wordt daarna nog zo lang bij elke seizoensrun ververst
+# Netwerk- en leesfouten. Eerst alleen URLError/TimeoutError/JSONDecodeError; een ConnectionResetError of
+# IncompleteRead tijdens resp.read() liet dan de hele run crashen (issue #5). OSError omvat URLError en
+# TimeoutError, ValueError omvat JSONDecodeError.
+NET_ERRORS = (OSError, ValueError, http.client.HTTPException)
 FORMAAT = 1             # versie van het compacte formaat; ophogen bij een verandering die oude apps breekt
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,27 +80,38 @@ def get_json(url, headers=None):
         return json.loads(resp.read().decode("utf-8")), resp.headers
 
 
+class LimitReached(RuntimeError):
+    """De call-grens is bereikt: stoppen met ophalen (niet doorgaan met de volgende competitie)."""
+
+
 class Api:
     """API-Football met tellerstand, pauze tussen calls en harde grenzen."""
 
-    def __init__(self, key, calls, remaining):
-        self.key, self.calls, self.remaining, self.last = key, calls, remaining, 0.0
+    def __init__(self, key):
+        self.key, self.calls, self.remaining, self.limit, self.last = key, 0, None, None, 0.0
 
     def check_status(self):
         """Actuele tellerstand bij API-Football (/status telt zelf niet mee voor de limiet)."""
         data, _ = get_json(f"{API}/status", {"x-apisports-key": self.key})
         req = (data.get("response") or {}).get("requests") or {}
         if "limit_day" in req:
+            self.limit = req["limit_day"]
             self.remaining = req["limit_day"] - req.get("current", 0)
             print(f"API-Football: {req.get('current')} van {req['limit_day']} calls vandaag gebruikt "
                   f"({(data['response'].get('subscription') or {}).get('plan')})")
 
+    def used_today(self):
+        """Calls vandaag volgens API-Football (alle gebruik van de sleutel, ook stadions.py), of None."""
+        if self.limit is None or self.remaining is None:
+            return None
+        return self.limit - self.remaining
+
     def can_call(self):
-        return self.calls < MAX_CALLS and (self.remaining is None or self.remaining >= MIN_REMAINING)
+        return self.calls < MAX_CALLS_PER_RUN and (self.remaining is None or self.remaining >= MIN_REMAINING)
 
     def get(self, endpoint, **params):
         if not self.can_call():
-            raise RuntimeError(f"grens bereikt ({self.calls} calls vandaag, nog {self.remaining} over)")
+            raise LimitReached(f"grens bereikt ({self.calls} calls deze run, nog {self.remaining} over vandaag)")
         wait = CALL_PAUSE - (time.time() - self.last)
         if wait > 0:
             time.sleep(wait)
@@ -101,8 +127,17 @@ class Api:
         return data
 
 
+class SiteUnavailable(Exception):
+    """De vorige site is tijdelijk niet (helemaal) te lezen: deze run zet niets neer."""
+
+
 def previous_site(pages_url):
-    """De vorige versie van de website: index, het seizoen per competitie en de standen."""
+    """De vorige versie van de website: index, het seizoen per competitie en de standen.
+
+    Alleen een 404 op index.json betekent "nog geen site" (eerste run). Eerst gold elke fout (503, timeout) als
+    "bestaat niet": dan deed een live-run een hele seizoensrun (±200 calls), of verdween één competitie van de
+    site (issue #2). Nu stopt de run bij elke andere fout, en ook als een bestand dat index.json noemt er niet is
+    (dan klopt de site niet en zou een run er data mee wissen)."""
     if not pages_url:
         return {}, {}, {}
     stamp = int(datetime.now().timestamp())
@@ -110,20 +145,22 @@ def previous_site(pages_url):
     def fetch(path):
         try:
             return get_json(f"{pages_url}/{path}?t={stamp}")[0]
-        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-            return None
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise SiteUnavailable(f"{path}: HTTP {e.code}") from e
+        except NET_ERRORS as e:
+            raise SiteUnavailable(f"{path}: {e!r}") from e
+
+    def required(path):
+        data = fetch(path)
+        if data is None:
+            raise SiteUnavailable(f"{path} staat in index.json maar geeft 404")
+        return data
 
     index = fetch("index.json") or {}
-    leagues = {}
-    for lid in index.get("competities", {}):
-        data = fetch(f"competities/{lid}.json")
-        if data is not None:
-            leagues[int(lid)] = data
-    standings = {}
-    for lid in index.get("standen", {}):
-        data = fetch(f"standen/{lid}.json")
-        if data is not None:
-            standings[int(lid)] = data
+    leagues = {int(lid): required(f"competities/{lid}.json") for lid in index.get("competities", {})}
+    standings = {int(lid): required(f"standen/{lid}.json") for lid in index.get("standen", {})}
     return index, leagues, standings
 
 
@@ -216,7 +253,10 @@ def split_groups(comp):
 
 
 def fetch_season(api, leagues, seasons):
-    """Het hele seizoen van elke gevolgde competitie. Vult {competitie-ID: compact bestand} en {ID: seizoensjaar}."""
+    """Het hele seizoen van elke gevolgde competitie. Vult {competitie-ID: compact bestand} en {ID: seizoensjaar}.
+    Geeft de ID's terug die echt opgehaald zijn: alleen die krijgen een nieuwe stempel in index.json (eerst kreeg
+    elke competitie de stempel van nu, ook als het ophalen mislukte en de oude data bleef staan; issue #8)."""
+    ok = set()
     for item in api.get("leagues", current="true")["response"]:
         lid = item["league"]["id"]
         if lid in LEAGUES:
@@ -228,14 +268,19 @@ def fetch_season(api, leagues, seasons):
             continue
         try:
             raw = api.get("fixtures", league=lid, season=year, timezone="Europe/Amsterdam")
-        except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
-            print(f"competitie {lid}: niet gelukt ({e})")
+        except LimitReached as e:
+            # Stoppen, net als fetch_standings; eerst volgde er per resterende competitie een foutregel (issue #9)
+            print(f"seizoen: gestopt bij competitie {lid} ({e})")
+            break
+        except (RuntimeError, *NET_ERRORS) as e:
+            print(f"competitie {lid}: niet gelukt ({e!r})")
             continue
         file = compact({"response": raw.get("response", [])}, str(year))
         if not file["competities"]:  # nog geen wedstrijden: naam en land uit /leagues halen we hier niet op
             continue
         leagues[lid] = file
-    return leagues
+        ok.add(lid)
+    return ok
 
 
 def compact_standings(raw, lid, year, stamp):
@@ -259,10 +304,11 @@ def compact_standings(raw, lid, year, stamp):
             # Periodestanden (Eerste Divisie: 'Period 1' t/m 4) niet: alleen de echte stand
             if not rows or "period" in name.lower():
                 continue
-            # Twee poules in één tabel (Derde Divisie A en B: posities 1–18 en dan weer 1–18): splitsen
+            # Twee poules in één tabel (Derde Divisie A en B: posities 1–18 en dan weer 1–18): splitsen. Met `<`,
+            # niet `<=`: twee clubs met dezelfde rang zijn geen nieuwe poule (issue #7)
             part = [rows[0]]
             for row in rows[1:]:
-                if row.get("pos", 0) <= part[-1].get("pos", 0):
+                if row.get("pos", 0) < part[-1].get("pos", 0):
                     groups.append({"naam": name, "rijen": part})
                     part = []
                 part.append(row)
@@ -271,16 +317,21 @@ def compact_standings(raw, lid, year, stamp):
 
 
 def standings_due(lid, file, standings, now):
-    """Stand opnieuw ophalen? Als er nog geen is, of als sinds de vorige stand een wedstrijd klaar is. Een
-    wedstrijd telt als klaar ±2 uur na de aftrap (API-Football werkt de stand pas na het eindsignaal bij)."""
+    """Stand opnieuw ophalen? Als er nog geen is, of als er een gespeelde wedstrijd klaar is en de vorige stand
+    van vóór of kort na dat moment is. Een wedstrijd telt als klaar ±2 uur na de aftrap.
+
+    Eerst werd de stand maar één keer na zo'n wedstrijd opgehaald. API-Football werkt de stand soms pas later
+    bij, en dan bleef een oude stand dagen staan (League Two miste een hele speelronde; issue #1). Nu wordt hij
+    nog STANDINGS_FOLLOW_UP lang bij elke seizoensrun ververst (±2 extra calls per competitie per speeldag).
+    Uitgesteld, afgelast en gestaakt tellen niet: de stand verandert dan niet."""
     old = standings.get(lid)
     if not old or not old.get("bijgewerkt"):
         return True
     last = datetime.fromisoformat(old["bijgewerkt"])
     for m in file["wedstrijden"]:
-        if m["status"] in DONE:
-            done_at = datetime.fromisoformat(m["aftrap"]) + timedelta(hours=2)
-            if last < done_at <= now:
+        if m["status"] in PLAYED:
+            done_at = datetime.fromisoformat(m["aftrap"]) + STANDINGS_AFTER
+            if done_at <= now and last < done_at + STANDINGS_FOLLOW_UP:
                 return True
     return False
 
@@ -294,10 +345,11 @@ def fetch_standings(api, leagues, seasons, standings, now):
             continue
         try:
             raw = api.get("standings", league=lid, season=year)
-        except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
-            print(f"stand {lid}: niet gelukt ({e})")
-            if isinstance(e, RuntimeError) and "grens" in str(e):
-                break
+        except LimitReached as e:
+            print(f"standen: gestopt bij {lid} ({e})")
+            break
+        except (RuntimeError, *NET_ERRORS) as e:
+            print(f"stand {lid}: niet gelukt ({e!r})")
             continue
         file = compact_standings(raw, lid, year, now.isoformat(timespec="seconds"))
         if file["groepen"]:  # geen stand (nog geen wedstrijden): de vorige laten staan
@@ -350,7 +402,8 @@ def day_file(leagues, day):
 
 
 def needs_live_refresh(today_file, now):
-    """Vandaag ophalen? Alleen als er een wedstrijd bezig is, binnen 15 minuten begint of net klaar zou moeten zijn."""
+    """Deze dag ophalen? Alleen als er een wedstrijd bezig is, binnen 15 minuten begint of net klaar zou moeten
+    zijn."""
     for m in today_file["wedstrijden"]:
         if m["status"] in LIVE:
             return True
@@ -358,6 +411,23 @@ def needs_live_refresh(today_file, now):
         if m["status"] not in DONE and kickoff - timedelta(minutes=15) <= now <= kickoff + timedelta(hours=3):
             return True
     return False
+
+
+def latest(stamps):
+    """Het laatste van een paar ISO-tijdstempels (lege overgeslagen). Als datetime vergeleken, niet als tekst:
+    rond de wintertijd staan er +02:00 en +01:00 door elkaar."""
+    return max((s for s in stamps if s), key=datetime.fromisoformat, default="")
+
+
+def oldest(stamps):
+    """Het vroegste van een paar ISO-tijdstempels (lege overgeslagen), zie latest()."""
+    return min((s for s in stamps if s), key=datetime.fromisoformat, default="")
+
+
+def set_output(changed):
+    if gh_output := os.environ.get("GITHUB_OUTPUT"):
+        with open(gh_output, "a") as f:
+            f.write(f"changed={'true' if changed else 'false'}\n")
 
 
 def write(path, data):
@@ -375,14 +445,20 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    index, leagues, standings = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
+    try:
+        index, leagues, standings = previous_site(os.environ.get("PAGES_URL", "").rstrip("/"))
+    except SiteUnavailable as e:
+        # Nog geen call gedaan; de volgende run probeert het opnieuw. Geen rode run (geen mail bij elke 503).
+        print(f"::warning::Vorige site niet te lezen ({e}); website blijft zoals hij is.")
+        set_output(False)
+        return
     utc_day = str(datetime.now(timezone.utc).date())
-    api = Api(key, index.get("calls", 0) if index.get("calls_dag") == utc_day else 0, None)
+    api = Api(key)
     if mode != "herbouw":
         try:
             api.check_status()
-        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
-            print(f"status niet op te vragen ({e})")
+        except NET_ERRORS as e:
+            print(f"status niet op te vragen ({e!r})")
     fetched_leagues = dict(index.get("competities", {}))
     live_fetched = index.get("live")
 
@@ -392,33 +468,38 @@ def main():
         if mode in ("seizoen", "alles"):
             before = len(leagues)
             seasons = {}
-            fetch_season(api, leagues, seasons)
+            ok = fetch_season(api, leagues, seasons)
             stamp = now.isoformat(timespec="seconds")
-            fetched_leagues = {str(lid): stamp for lid in leagues}
-            print(f"seizoen: {len(leagues)} competities ({len(leagues) - before} nieuw)")
+            fetched_leagues = {str(lid): stamp if lid in ok else fetched_leagues.get(str(lid), "")
+                               for lid in leagues}
+            print(f"seizoen: {len(ok)} van {len(leagues)} competities opgehaald ({len(leagues) - before} nieuw)")
             fetch_standings(api, leagues, seasons, standings, now)
         elif mode == "live":
             days = [today]
             if now.hour < 2:
                 days.insert(0, today - timedelta(days=1))  # net na middernacht: gisteren afronden
             for d in days:
-                if d == today and not needs_live_refresh(day_file(leagues, str(d)), now):
-                    print("live: niets bezig, geen call")
+                # Ook voor gisteren: eerst werd gisteren na middernacht bij elke run opgehaald, ook als alles al
+                # klaar was (issue #6)
+                if not needs_live_refresh(day_file(leagues, str(d)), now):
+                    print(f"live {d}: niets bezig, geen call")
                     continue
                 raw = api.get("fixtures", date=str(d), timezone="Europe/Amsterdam")
                 ours = {"response": [f for f in raw.get("response", []) if f["league"]["id"] in LEAGUES]}
                 n = apply_live(leagues, compact(ours, str(d)))
                 live_fetched = now.isoformat(timespec="seconds")
                 print(f"live {d}: {len(ours['response'])} wedstrijden, {n} veranderd")
-    except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
-        print(f"gestopt: {e}")
+            # Een competitie die live voor het eerst opduikt, moet in de index staan: anders leest de volgende
+            # run hem niet terug van de site
+            for lid in leagues:
+                fetched_leagues.setdefault(str(lid), live_fetched or "")
+    except (RuntimeError, *NET_ERRORS) as e:
+        print(f"gestopt: {e!r}")
 
     if not leagues:
         # Niets opgehaald en ook niets van de vorige site: de website niet leeg overschrijven
         print("Geen seizoensgegevens; website blijft zoals hij is.")
-        if gh_output := os.environ.get("GITHUB_OUTPUT"):
-            with open(gh_output, "a") as f:
-                f.write("changed=false\n")
+        set_output(False)
         sys.exit(1 if mode != "herbouw" else 0)
 
     # Alles opnieuw neerzetten uit de seizoensgegevens
@@ -440,16 +521,19 @@ def main():
         texts.append(text)
     content = hashlib.sha1("".join(texts).encode()).hexdigest()
 
+    # Hoe vers elke dag is: de oudste competitie. Voor vandaag het laatste van dat en de live-call: eerst won de
+    # live-call altijd, ook als die van gisteravond was en er daarna een seizoensrun was (issue #10)
+    season_stamp = oldest(fetched_leagues.values())
     new_index = {
         "formaat": FORMAAT,
         "bijgewerkt": now.isoformat(timespec="seconds"),
-        "dagen": {d: (live_fetched if d == str(today) and live_fetched else min(fetched_leagues.values(), default=""))
-                  for d in window},
+        "dagen": {d: latest([season_stamp, live_fetched]) if d == str(today) else season_stamp for d in window},
         "competities": fetched_leagues,
         "standen": {str(lid): file.get("bijgewerkt") for lid, file in sorted(standings.items())},
         "live": live_fetched,
         "calls_dag": utc_day,
-        "calls": api.calls,
+        "calls": api.used_today() if api.used_today() is not None else index.get("calls"),  # volgens API-Football
+        "calls_run": api.calls,
         "over": api.remaining,
         "inhoud": content,
         "bron": "API-Football (api-sports.io)",
@@ -457,11 +541,9 @@ def main():
     (SITE / "index.json").write_text(json.dumps(new_index, indent=1), encoding="utf-8")
 
     changed = content != index.get("inhoud") or mode in ("alles", "herbouw")
-    print(f"Modus {mode}: {api.calls} calls vandaag, nog {api.remaining} over, "
+    print(f"Modus {mode}: {api.calls} calls deze run, {api.used_today()} vandaag, nog {api.remaining} over, "
           f"{'nieuwe inhoud' if changed else 'niets veranderd'}")
-    if gh_output := os.environ.get("GITHUB_OUTPUT"):
-        with open(gh_output, "a") as f:
-            f.write(f"changed={'true' if changed else 'false'}\n")
+    set_output(changed)
 
 
 if __name__ == "__main__":
