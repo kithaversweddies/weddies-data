@@ -9,6 +9,8 @@ in een eigen compact formaat:
 - `competities/<id>.json`: het hele seizoen van één competitie (zelfde formaat; `datum` is dan het seizoensjaar)
 - `seizoen.json`: clubs per competitie in het huidige seizoen (met groepen, bv. Derde Divisie zaterdag)
 - `standen/<id>.json`: de stand van één competitie, per poule (zie hieronder)
+- `details/<yyyy-mm-dd>.json`: opstellingen en doelpunten van de gespeelde wedstrijden van die dag (zie hieronder).
+  Deze bestanden staan ook in deze repo (`details/`): de Action zet ze na het ophalen terug met een commit
 - `privacy.html` en `support.html`: het privacybeleid en de supportpagina van de app (bron: `pagina/`)
 
 Het hele seizoen wordt elke 3 uur ververst; live standen van vandaag elke 5 minuten (alleen als er iets bezig is).
@@ -59,3 +61,24 @@ Schema en rekensom: zie `.github/workflows/wedstrijden.yml`.
 - `g` gespeeld, `w` gewonnen, `gl` gelijk, `v` verloren, `dv`/`dt` doelpunten voor/tegen, `p` punten (die van
   API-Football, dus met eventuele puntenaftrek), `vorm` de laatste uitslagen, `opm` de omschrijving van de plek
   (promotie, degradatie). Lege velden ontbreken.
+
+## Formaat van `details/<datum>.json` (formaat 1)
+
+```json
+{
+  "formaat": 1,
+  "datum": "2026-10-18",
+  "wedstrijden": {
+    "1552198": {"opst": true, "pogingen": 1, "op": "2026-10-24T17:40:00+02:00",
+                "spelers": [[128765, "Søren Tengstedt", 410, 1], [150001, "J. Jansen", 410, 0]],
+                "goals": [[128765, "Søren Tengstedt", 410, 7, "N"]]}
+  }
+}
+```
+
+- `spelers`: [speler-ID, naam, club-ID, 1 = basis / 0 = ingevallen]. Wisselspelers die niet invielen staan er niet in.
+- `goals`: [speler-ID, naam, club-ID, minuut, soort]: `N` gewoon, `P` penalty, `E` eigen doelpunt. Gemiste
+  penalty's en de strafschoppenreeks staan er niet in.
+- `opst`: of er een opstelling was. Bij amateurs ontbreekt die bij API-Football bijna altijd; doelpunten met naam
+  vaak niet. Zonder opstelling of met minder doelpunten dan de uitslag wordt het nog tot 3 keer opnieuw geprobeerd,
+  steeds een dag later.

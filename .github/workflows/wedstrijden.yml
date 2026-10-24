@@ -6,7 +6,9 @@ name: Wedstrijden ophalen
 #   seizoen: elke 3 uur (:22) × ±101 calls (hele seizoen van alle competities)                   = ±  808
 #   standen: alleen competities met een gespeelde wedstrijd in de laatste ±6 uur (API-Football werkt
 #            de stand soms laat bij); op een drukke zaterdag ±4 runs × ±100, doordeweeks weinig  = ±0–400
-#   totaal                                                                                        = ±1.000–1.400
+#   details: opstellingen en doelpunten van gespeelde wedstrijden, 20 per call; op een drukke
+#            zaterdag ±20, doordeweeks een paar (het begin van het seizoen: eenmalig ±500)        = ±0–60
+#   totaal                                                                                        = ±1.000–1.450
 # Het script stopt als API-Football minder dan 1.500 over meldt (dat telt ook stadions.py mee), en na
 # 400 calls in één run.
 on:
@@ -22,7 +24,7 @@ on:
         options: [alles, live, herbouw]
 
 permissions:
-  contents: read
+  contents: write   # details/ (opstellingen en doelpunten) terugzetten in de repo
   pages: write
   id-token: write
 
@@ -47,6 +49,17 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
           MODE: ${{ github.event.schedule == '*/5 9-22 * * *' && 'live' || (github.event.schedule && 'seizoen' || inputs.modus || 'alles') }}
+
+      # Opstellingen en doelpunten staan in de repo (details/), zodat een run ze niet van de site hoeft te halen
+      - if: steps.fetch.outputs.details_changed == 'true'
+        name: Opstellingen en doelpunten bewaren
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add details
+          git commit -q -m "Opstellingen en doelpunten bijgewerkt"
+          git pull -q --rebase
+          git push -q
 
       - if: steps.fetch.outputs.changed == 'true'
         uses: actions/configure-pages@v6

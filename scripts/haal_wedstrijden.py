@@ -12,6 +12,8 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
   site/seizoen.json                   clubs per competitie in het huidige seizoen (voor het paspoort)
   site/standen/<id>.json              de stand van één competitie, per poule (/standings, voor de clubpagina
                                       en de positie op het wedstrijdkaartje)
+  site/details/<yyyy-mm-dd>.json      opstellingen en doelpunten van gespeelde wedstrijden (voor "Meest gezien"
+                                      in de app); bewaard in details/ in deze repo, zie fetch_details()
   site/privacy.html, site/support.html  vaste pagina's uit pagina/ (privacybeleid en support voor de App Store)
 
 Modi (MODE):
@@ -19,7 +21,9 @@ Modi (MODE):
   call voor de seizoensjaren (/leagues?current=true). ±101 calls (100 competities). Hieruit worden alle
   bestanden gemaakt. Daarna de stand (/standings) van elke competitie waar in de laatste uren een wedstrijd
   klaar is (of die nog geen stand heeft): op speeldagen dus een paar keer per dag, doordeweeks bijna niets.
-  ±0–100 calls.
+  ±0–100 calls. Daarna opstellingen en doelpunten (/fixtures?ids=, 20 wedstrijden per call) van wedstrijden die
+  sinds de vorige keer gespeeld zijn: ±0–25 calls, en het begin van het seizoen in stukjes van hooguit
+  MAX_DETAIL_CALLS per run.
 - 'live' (elke 5 minuten overdag): alleen vandaag (en net na middernacht gisteren) (/fixtures?date=..), en alleen
   als er iets bezig is of binnen 15 minuten begint. 1 call per dag. Zonder eerdere seizoensgegevens (eerste run)
   doet hij 'seizoen'.
@@ -69,7 +73,15 @@ STANDINGS_FOLLOW_UP = timedelta(hours=6)  # en de stand wordt daarna nog zo lang
 NET_ERRORS = (OSError, ValueError, http.client.HTTPException)
 FORMAAT = 1             # versie van het compacte formaat; ophogen bij een verandering die oude apps breekt
 
+# Opstellingen en doelpunten (fetch_details)
+DETAIL_IDS_PER_CALL = 20     # /fixtures?ids= geeft er hooguit 20 per call, mét opstellingen en gebeurtenissen
+MAX_DETAIL_CALLS = 60        # per run; het hele seizoen tot nu toe (±10.000 wedstrijden) duurt zo een dag of twee
+DETAIL_AFTER = timedelta(hours=3)   # zo lang na de aftrap is een wedstrijd (met opstellingen) compleet
+DETAIL_RETRIES = 3           # zonder opstelling of doelpunten nog zo vaak opnieuw proberen…
+DETAIL_RETRY_AFTER = timedelta(hours=24)   # …met een dag ertussen (API-Football vult soms later aan)
+
 ROOT = Path(__file__).resolve().parent.parent
+DETAILS = ROOT / "details"   # in de repo zelf: zo hoeft een run ze niet van de vorige site te halen
 SITE = Path(os.environ.get("SITE_DIR", ROOT / "site"))
 LEAGUES = set(json.loads((ROOT / "competities.json").read_text())["competities"])
 
@@ -358,6 +370,109 @@ def fetch_standings(api, leagues, seasons, standings, now):
     print(f"standen: {fetched} opgehaald")
 
 
+def compact_details(fixture):
+    """Eén wedstrijd van /fixtures?ids= -> wat de app nodig heeft voor "Meest gezien".
+
+    - `spelers`: [speler-ID, naam, club-ID, 1 = basis / 0 = ingevallen]. Een wissel staat bij API-Football als
+      gebeurtenis "subst" met `player` = wie eruit gaat en `assist` = wie erin komt (nagekeken 2026-10-24); een
+      wisselspeler die niet inviel, telt niet.
+    - `goals`: [speler-ID, naam, club-ID, minuut, "N" gewoon / "P" penalty / "E" eigen doelpunt]. Gemiste
+      penalty's niet.
+    - `opst`: of er een opstelling was. Bij amateurs (Derde Divisie, Serie D, Tercera, Oberliga) ontbreekt die bijna
+      altijd; doelpunten met naam staan er vaak wel."""
+    lineups = fixture.get("lineups") or []
+    events = fixture.get("events") or []
+    came_on = {((e.get("assist") or {}).get("id")) for e in events if e.get("type") == "subst"}
+    players = []
+    for team in lineups:
+        club = (team.get("team") or {}).get("id")
+        for item in team.get("startXI") or []:
+            pl = item.get("player") or {}
+            if pl.get("id"):
+                players.append([pl["id"], html.unescape(pl.get("name") or ""), club, 1])
+        for item in team.get("substitutes") or []:
+            pl = item.get("player") or {}
+            if pl.get("id") and pl["id"] in came_on:
+                players.append([pl["id"], html.unescape(pl.get("name") or ""), club, 0])
+    goals = []
+    for e in events:
+        # Gemiste penalty's en de strafschoppenreeks tellen niet (die staan ook als "Goal")
+        if e.get("type") != "Goal" or e.get("detail") == "Missed Penalty" or e.get("comments") == "Penalty Shootout":
+            continue
+        pl = e.get("player") or {}
+        kind = {"Penalty": "P", "Own Goal": "E"}.get(e.get("detail"), "N")
+        goals.append([pl.get("id"), html.unescape(pl.get("name") or ""), (e.get("team") or {}).get("id"),
+                      (e.get("time") or {}).get("elapsed"), kind])
+    return {"opst": bool(players), "spelers": players, "goals": goals}
+
+
+def load_details():
+    """Alle eerder opgehaalde opstellingen en doelpunten uit details/: {datum: {"wedstrijden": {id: …}}}."""
+    out = {}
+    for path in sorted(DETAILS.glob("*.json")):
+        try:
+            out[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as e:
+            print(f"::warning::details/{path.name} niet te lezen ({e!r}); wordt opnieuw opgebouwd")
+    return out
+
+
+def details_due(match, stored, now):
+    """Opstelling en doelpunten (opnieuw) ophalen? Alleen voor gespeelde wedstrijden, ±3 uur na de aftrap. Zonder
+    opstelling of zonder alle doelpunten nog een paar keer, een dag later (lagere divisies vult API-Football soms
+    later aan)."""
+    if match["status"] not in ("FT", "AET", "PEN"):
+        return False
+    kickoff = datetime.fromisoformat(match["aftrap"])
+    if kickoff + DETAIL_AFTER > now:
+        return False
+    if stored is None:
+        return True
+    complete = stored.get("opst") and len(stored.get("goals", [])) == sum(match.get("stand") or [0, 0])
+    if complete or stored.get("pogingen", 1) >= DETAIL_RETRIES:
+        return False
+    last = datetime.fromisoformat(stored["op"]) if stored.get("op") else kickoff
+    return last + DETAIL_RETRY_AFTER <= now
+
+
+def fetch_details(api, leagues, details, now):
+    """Opstellingen en doelpunten van gespeelde wedstrijden, 20 per call (/fixtures?ids=), nieuwste eerst. Geeft
+    het aantal opgehaalde wedstrijden terug."""
+    todo = []
+    for file in leagues.values():
+        for m in file["wedstrijden"]:
+            day = m["aftrap"][:10]
+            stored = details.get(day, {}).get("wedstrijden", {}).get(str(m["id"]))
+            if details_due(m, stored, now):
+                todo.append(m)
+    todo.sort(key=lambda m: m["aftrap"], reverse=True)
+    print(f"details: {len(todo)} wedstrijden te doen")
+    stamp = now.isoformat(timespec="seconds")
+    done = 0
+    for start in range(0, min(len(todo), MAX_DETAIL_CALLS * DETAIL_IDS_PER_CALL), DETAIL_IDS_PER_CALL):
+        batch = todo[start:start + DETAIL_IDS_PER_CALL]
+        try:
+            raw = api.get("fixtures", ids="-".join(str(m["id"]) for m in batch), timezone="Europe/Amsterdam")
+        except LimitReached as e:
+            print(f"details: gestopt ({e})")
+            break
+        except (RuntimeError, *NET_ERRORS) as e:
+            print(f"details: niet gelukt ({e!r})")
+            continue
+        found = {f["fixture"]["id"]: f for f in raw.get("response", [])}
+        for m in batch:
+            day = m["aftrap"][:10]
+            file = details.setdefault(day, {"formaat": FORMAAT, "datum": day, "wedstrijden": {}})
+            old = file["wedstrijden"].get(str(m["id"]))
+            item = compact_details(found[m["id"]]) if m["id"] in found else {"opst": False, "spelers": [], "goals": []}
+            item["pogingen"] = (old or {}).get("pogingen", 0) + 1
+            item["op"] = stamp
+            file["wedstrijden"][str(m["id"])] = item
+            done += 1
+    print(f"details: {done} wedstrijden opgehaald")
+    return done
+
+
 def all_matches(leagues):
     """{wedstrijd-ID: (wedstrijd, competitie-info)} over alle competities."""
     out = {}
@@ -424,10 +539,12 @@ def oldest(stamps):
     return min((s for s in stamps if s), key=datetime.fromisoformat, default="")
 
 
-def set_output(changed):
+def set_output(changed, details_changed=False):
     if gh_output := os.environ.get("GITHUB_OUTPUT"):
         with open(gh_output, "a") as f:
             f.write(f"changed={'true' if changed else 'false'}\n")
+            # details/ is bijgewerkt: de workflow zet die bestanden terug in de repo (commit + push)
+            f.write(f"details_changed={'true' if details_changed else 'false'}\n")
 
 
 def write(path, data):
@@ -461,6 +578,8 @@ def main():
             print(f"status niet op te vragen ({e!r})")
     fetched_leagues = dict(index.get("competities", {}))
     live_fetched = index.get("live")
+    details = load_details()
+    details_fetched = 0
 
     if mode == "live" and not leagues:
         mode = "seizoen"  # eerste run: eerst het hele seizoen
@@ -474,6 +593,7 @@ def main():
                                for lid in leagues}
             print(f"seizoen: {len(ok)} van {len(leagues)} competities opgehaald ({len(leagues) - before} nieuw)")
             fetch_standings(api, leagues, seasons, standings, now)
+            details_fetched = fetch_details(api, leagues, details, now)
         elif mode == "live":
             days = [today]
             if now.hour < 2:
@@ -513,6 +633,12 @@ def main():
     texts.append(write(SITE / "seizoen.json", build_season(leagues.values())))
     for lid, file in sorted(standings.items()):
         texts.append(write(SITE / "standen" / f"{lid}.json", file))
+    # Opstellingen en doelpunten: in de repo (details/) en op de site
+    for day, file in sorted(details.items()):
+        text = write(SITE / "details" / f"{day}.json", file)
+        texts.append(text)
+        if details_fetched:
+            write(DETAILS / f"{day}.json", file)
     # Vaste pagina's (privacybeleid, support) uit pagina/: Pages wordt elke run helemaal vervangen, dus ze moeten
     # elke keer mee. Ze tellen mee voor `inhoud`, zodat een aangepaste pagina ook online komt.
     for page in sorted((ROOT / "pagina").glob("*.html")):
@@ -530,6 +656,7 @@ def main():
         "dagen": {d: latest([season_stamp, live_fetched]) if d == str(today) else season_stamp for d in window},
         "competities": fetched_leagues,
         "standen": {str(lid): file.get("bijgewerkt") for lid, file in sorted(standings.items())},
+        "details": sorted(details),
         "live": live_fetched,
         "calls_dag": utc_day,
         "calls": api.used_today() if api.used_today() is not None else index.get("calls"),  # volgens API-Football
@@ -543,7 +670,7 @@ def main():
     changed = content != index.get("inhoud") or mode in ("alles", "herbouw")
     print(f"Modus {mode}: {api.calls} calls deze run, {api.used_today()} vandaag, nog {api.remaining} over, "
           f"{'nieuwe inhoud' if changed else 'niets veranderd'}")
-    set_output(changed)
+    set_output(changed, details_changed=details_fetched > 0)
 
 
 if __name__ == "__main__":
