@@ -12,8 +12,10 @@ Schrijft naar site/ (dat wordt via GitHub Pages online gezet), alles in Weddies'
   site/seizoen.json                   clubs per competitie in het huidige seizoen (voor het paspoort)
   site/standen/<id>.json              de stand van één competitie, per poule (/standings, voor de clubpagina
                                       en de positie op het wedstrijdkaartje)
-  site/details/<yyyy-mm-dd>.json      opstellingen en doelpunten van gespeelde wedstrijden (voor "Meest gezien"
-                                      in de app); bewaard in details/ in deze repo, zie fetch_details()
+  site/details/<yyyy-mm-dd>.json      per dag wie er speelde en scoorde (klein, voor "Meest gezien" in de app)
+  site/wedstrijd/<id>.json            alles van één gespeelde wedstrijd: doelpunten, kaarten, wissels, opstellingen
+                                      en statistieken (voor het wedstrijdscherm in de app). Beide gemaakt uit
+                                      details/ in deze repo, zie fetch_details()
   site/privacy.html, site/support.html  vaste pagina's uit pagina/ (privacybeleid en support voor de App Store)
 
 Modi (MODE):
@@ -79,6 +81,13 @@ MAX_DETAIL_CALLS = 60        # per run; het hele seizoen tot nu toe (±10.000 we
 DETAIL_AFTER = timedelta(hours=3)   # zo lang na de aftrap is een wedstrijd (met opstellingen) compleet
 DETAIL_RETRIES = 3           # zonder opstelling of doelpunten nog zo vaak opnieuw proberen…
 DETAIL_RETRY_AFTER = timedelta(hours=24)   # …met een dag ertussen (API-Football vult soms later aan)
+DETAIL_VERSION = 2           # 2: ook kaarten, wissels, opstellingen en statistieken (wedstrijdscherm, 2026-10-24).
+                             # Oudere wedstrijden worden in de volgende runs opnieuw opgehaald, nieuwste eerst.
+# Statistieken die het wedstrijdscherm toont (API-Football-naam → eigen sleutel)
+STATS = {"Ball Possession": "balbezit", "Total Shots": "schoten", "Shots on Goal": "opDoel",
+         "Corner Kicks": "hoekschoppen", "Fouls": "overtredingen", "Offsides": "buitenspel",
+         "Yellow Cards": "geel", "Red Cards": "rood", "Goalkeeper Saves": "reddingen", "Total passes": "passes",
+         "expected_goals": "xg"}
 
 ROOT = Path(__file__).resolve().parent.parent
 DETAILS = ROOT / "details"   # in de repo zelf: zo hoeft een run ze niet van de vorige site te halen
@@ -379,7 +388,9 @@ def compact_details(fixture):
     - `goals`: [speler-ID, naam, club-ID, minuut, "N" gewoon / "P" penalty / "E" eigen doelpunt]. Gemiste
       penalty's niet.
     - `opst`: of er een opstelling was. Bij amateurs (Derde Divisie, Serie D, Tercera, Oberliga) ontbreekt die bijna
-      altijd; doelpunten met naam staan er vaak wel."""
+      altijd; doelpunten met naam staan er vaak wel.
+    Sinds versie 2 (`v`) ook voor het wedstrijdscherm (zie compact_match): `goals` met de extra minuut als zesde
+    waarde, `kaarten`, `wissels`, `opstellingen`, `stats` en `rust` (ruststand). Lege onderdelen ontbreken."""
     lineups = fixture.get("lineups") or []
     events = fixture.get("events") or []
     came_on = {((e.get("assist") or {}).get("id")) for e in events if e.get("type") == "subst"}
@@ -402,8 +413,63 @@ def compact_details(fixture):
         pl = e.get("player") or {}
         kind = {"Penalty": "P", "Own Goal": "E"}.get(e.get("detail"), "N")
         goals.append([pl.get("id"), html.unescape(pl.get("name") or ""), (e.get("team") or {}).get("id"),
-                      (e.get("time") or {}).get("elapsed"), kind])
-    return {"opst": bool(players), "spelers": players, "goals": goals}
+                      (e.get("time") or {}).get("elapsed"), kind, (e.get("time") or {}).get("extra")])
+    item = {"v": DETAIL_VERSION, "opst": bool(players), "spelers": players, "goals": goals}
+
+    # Kaarten: [speler-ID, naam, club-ID, minuut, extra, "G" geel / "GR" tweede geel / "R" rood]
+    cards = []
+    for e in events:
+        if e.get("type") != "Card":
+            continue
+        detail = (e.get("detail") or "").lower()
+        kind = "GR" if "second" in detail else "R" if "red" in detail else "G"
+        pl = e.get("player") or {}
+        cards.append([pl.get("id"), html.unescape(pl.get("name") or ""), (e.get("team") or {}).get("id"),
+                      (e.get("time") or {}).get("elapsed"), (e.get("time") or {}).get("extra"), kind])
+    # Wissels: [minuut, club-ID, eruit, erin]
+    subs = [[(e.get("time") or {}).get("elapsed"), (e.get("team") or {}).get("id"),
+             html.unescape((e.get("player") or {}).get("name") or ""),
+             html.unescape((e.get("assist") or {}).get("name") or "")]
+            for e in events if e.get("type") == "subst"]
+    # Opstellingen: per club de formatie, de trainer, de basis en de wisselspelers die invielen ([nr, naam, positie])
+    teams = []
+    for team in lineups:
+        def row(item):
+            pl = item.get("player") or {}
+            return [pl.get("number"), html.unescape(pl.get("name") or ""), pl.get("pos")]
+        start = [row(i) for i in team.get("startXI") or []]
+        if not start:
+            continue
+        teams.append({k: v for k, v in {
+            "club": (team.get("team") or {}).get("id"),
+            "formatie": team.get("formation"),
+            "trainer": html.unescape((team.get("coach") or {}).get("name") or "") or None,
+            "basis": start,
+            "invallers": [row(i) for i in team.get("substitutes") or []
+                          if (i.get("player") or {}).get("id") in came_on],
+        }.items() if v})
+    # Statistieken per club, alleen wat er is
+    stats = {}
+    for team in fixture.get("statistics") or []:
+        club = (team.get("team") or {}).get("id")
+        values = {STATS[x["type"]]: x["value"] for x in team.get("statistics") or []
+                  if x.get("type") in STATS and x.get("value") is not None}
+        if club and values:
+            stats[str(club)] = values
+    half = (fixture.get("score") or {}).get("halftime") or {}
+    for key, value in (("kaarten", cards), ("wissels", subs), ("opstellingen", teams), ("stats", stats)):
+        if value:
+            item[key] = value
+    if half.get("home") is not None and half.get("away") is not None:
+        item["rust"] = [half["home"], half["away"]]
+    return item
+
+
+def slim_details(file):
+    """Het dagbestand voor "Meest gezien": alleen wie er speelde en scoorde (de rest staat in wedstrijd/<id>.json)."""
+    keep = ("opst", "spelers", "goals", "pogingen", "op", "v")
+    return {**file, "wedstrijden": {fid: {k: item[k] for k in keep if k in item}
+                                    for fid, item in file.get("wedstrijden", {}).items()}}
 
 
 def load_details():
@@ -427,6 +493,9 @@ def details_due(match, stored, now):
     if kickoff + DETAIL_AFTER > now:
         return False
     if stored is None:
+        return True
+    # Opgehaald vóór het wedstrijdscherm (zonder kaarten, opstellingen en statistieken): nog één keer
+    if stored.get("v", 1) < DETAIL_VERSION:
         return True
     complete = stored.get("opst") and len(stored.get("goals", [])) == sum(match.get("stand") or [0, 0])
     if complete or stored.get("pogingen", 1) >= DETAIL_RETRIES:
@@ -464,8 +533,10 @@ def fetch_details(api, leagues, details, now):
             day = m["aftrap"][:10]
             file = details.setdefault(day, {"formaat": FORMAAT, "datum": day, "wedstrijden": {}})
             old = file["wedstrijden"].get(str(m["id"]))
-            item = compact_details(found[m["id"]]) if m["id"] in found else {"opst": False, "spelers": [], "goals": []}
-            item["pogingen"] = (old or {}).get("pogingen", 0) + 1
+            item = compact_details(found[m["id"]]) if m["id"] in found else {"v": DETAIL_VERSION, "opst": False,
+                                                                              "spelers": [], "goals": []}
+            # Bij het opnieuw ophalen voor versie 2 telt de oude poging niet mee
+            item["pogingen"] = ((old or {}).get("pogingen", 0) if (old or {}).get("v", 1) >= DETAIL_VERSION else 0) + 1
             item["op"] = stamp
             file["wedstrijden"][str(m["id"])] = item
             done += 1
@@ -633,10 +704,13 @@ def main():
     texts.append(write(SITE / "seizoen.json", build_season(leagues.values())))
     for lid, file in sorted(standings.items()):
         texts.append(write(SITE / "standen" / f"{lid}.json", file))
-    # Opstellingen en doelpunten: in de repo (details/) en op de site
+    # Opstellingen en doelpunten: alles in de repo (details/); op de site per dag een klein bestand (Meest gezien)
+    # en per wedstrijd alles (wedstrijdscherm). Alleen wedstrijden met iets erin krijgen een eigen bestand.
     for day, file in sorted(details.items()):
-        text = write(SITE / "details" / f"{day}.json", file)
-        texts.append(text)
+        texts.append(write(SITE / "details" / f"{day}.json", slim_details(file)))
+        for fid, item in file.get("wedstrijden", {}).items():
+            if any(item.get(k) for k in ("goals", "opst", "kaarten", "stats", "rust")):
+                texts.append(write(SITE / "wedstrijd" / f"{fid}.json", {"formaat": FORMAAT, "id": int(fid), **item}))
         if details_fetched:
             write(DETAILS / f"{day}.json", file)
     # Vaste pagina's (privacybeleid, support) uit pagina/: Pages wordt elke run helemaal vervangen, dus ze moeten

@@ -9,8 +9,9 @@ in een eigen compact formaat:
 - `competities/<id>.json`: het hele seizoen van één competitie (zelfde formaat; `datum` is dan het seizoensjaar)
 - `seizoen.json`: clubs per competitie in het huidige seizoen (met groepen, bv. Derde Divisie zaterdag)
 - `standen/<id>.json`: de stand van één competitie, per poule (zie hieronder)
-- `details/<yyyy-mm-dd>.json`: opstellingen en doelpunten van de gespeelde wedstrijden van die dag (zie hieronder).
-  Deze bestanden staan ook in deze repo (`details/`): de Action zet ze na het ophalen terug met een commit
+- `details/<yyyy-mm-dd>.json`: per dag wie er speelde en scoorde (zie hieronder). De volledige versie staat in deze
+  repo (`details/`): de Action zet die na het ophalen terug met een commit
+- `wedstrijd/<id>.json`: alles van één gespeelde wedstrijd, voor het wedstrijdscherm (zie hieronder)
 - `privacy.html` en `support.html`: het privacybeleid en de supportpagina van de app (bron: `pagina/`)
 
 Het hele seizoen wordt elke 3 uur ververst; live standen van vandaag elke 5 minuten (alleen als er iets bezig is).
@@ -82,3 +83,25 @@ Schema en rekensom: zie `.github/workflows/wedstrijden.yml`.
 - `opst`: of er een opstelling was. Bij amateurs ontbreekt die bij API-Football bijna altijd; doelpunten met naam
   vaak niet. Zonder opstelling of met minder doelpunten dan de uitslag wordt het nog tot 3 keer opnieuw geprobeerd,
   steeds een dag later.
+
+## Formaat van `wedstrijd/<id>.json` (formaat 1)
+
+Zelfde velden als een wedstrijd in `details/`, plus (alleen als ze er zijn):
+
+```json
+{
+  "formaat": 1, "id": 1552198, "v": 2, "opst": true, "rust": [0, 1],
+  "goals": [[37438, "Sven Mijnans", 197, 21, "N", null]],
+  "kaarten": [[37438, "Sven Mijnans", 197, 38, null, "G"]],
+  "wissels": [[40, 197, "Guus Til", "Mikkel Bro Hansen"]],
+  "opstellingen": [{"club": 198, "formatie": "5-3-2", "trainer": "R. Peter",
+                    "basis": [[1, "K. Nikiéma", "G"]], "invallers": [[7, "D. van Mieghem", "F"]]}],
+  "stats": {"198": {"balbezit": "53%", "schoten": 14, "opDoel": 2, "hoekschoppen": 3, "overtredingen": 20,
+                    "buitenspel": 1, "geel": 3, "rood": 0, "reddingen": 3, "passes": 477, "xg": "1.43"}}
+}
+```
+
+- `goals`: […, minuut, soort, extra minuut]; `kaarten`: [speler-ID, naam, club-ID, minuut, extra, `G`/`GR`/`R`]
+  (geel, tweede geel, rood); `wissels`: [minuut, club-ID, eruit, erin]; `opstellingen`: [rugnummer, naam, positie].
+- Wat API-Football niet heeft, ontbreekt (bij amateurs vaak alles behalve de ruststand). Alleen wedstrijden met
+  iets erin krijgen een bestand.
