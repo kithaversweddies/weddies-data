@@ -40,7 +40,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Altijd de nieuwste main, niet de commit waarop de run werd gestart: een run die net na een andere start,
+      # las anders de oude details/ en zette die (zonder kaarten en opstellingen) weer op de site (2026-10-24)
       - uses: actions/checkout@v7
+        with:
+          ref: main
 
       - id: fetch
         name: Wedstrijden ophalen bij API-Football
