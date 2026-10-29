@@ -431,12 +431,13 @@ def compact_details(fixture):
              html.unescape((e.get("player") or {}).get("name") or ""),
              html.unescape((e.get("assist") or {}).get("name") or "")]
             for e in events if e.get("type") == "subst"]
-    # Opstellingen: per club de formatie, de trainer, de basis en de wisselspelers die invielen ([nr, naam, positie])
+    # Opstellingen: per club de formatie, de trainer, de basis en de wisselspelers die invielen
+    # ([nr, naam, positie, speler-ID]; het ID sinds 2026-10-28 voor de spelerspagina in de app)
     teams = []
     for team in lineups:
         def row(item):
             pl = item.get("player") or {}
-            return [pl.get("number"), html.unescape(pl.get("name") or ""), pl.get("pos")]
+            return [pl.get("number"), html.unescape(pl.get("name") or ""), pl.get("pos"), pl.get("id")]
         start = [row(i) for i in team.get("startXI") or []]
         if not start:
             continue
@@ -463,6 +464,24 @@ def compact_details(fixture):
     if half.get("home") is not None and half.get("away") is not None:
         item["rust"] = [half["home"], half["away"]]
     return item
+
+
+def with_lineup_ids(item):
+    """Opstellingen van vóór 2026-10-28 hebben geen speler-ID ([nr, naam, positie]). Zonder nieuwe calls aanvullen
+    uit `spelers` (zelfde bron, zelfde naam en club), zodat ook oudere wedstrijden naar de spelerspagina linken."""
+    if not item.get("opstellingen"):
+        return item
+    ids = {}
+    for pid, name, club, *_ in item.get("spelers") or []:
+        ids.setdefault((club, name), pid)
+    teams = []
+    for team in item["opstellingen"]:
+        def fill(row, club=team.get("club")):
+            if len(row) >= 4 and row[3]:
+                return row
+            return [*row[:3], ids.get((club, row[1]))]
+        teams.append({**team, **{k: [fill(r) for r in team[k]] for k in ("basis", "invallers") if team.get(k)}})
+    return {**item, "opstellingen": teams}
 
 
 def slim_details(file):
@@ -710,7 +729,8 @@ def main():
         texts.append(write(SITE / "details" / f"{day}.json", slim_details(file)))
         for fid, item in file.get("wedstrijden", {}).items():
             if any(item.get(k) for k in ("goals", "opst", "kaarten", "stats", "rust")):
-                texts.append(write(SITE / "wedstrijd" / f"{fid}.json", {"formaat": FORMAAT, "id": int(fid), **item}))
+                texts.append(write(SITE / "wedstrijd" / f"{fid}.json",
+                                   {"formaat": FORMAAT, "id": int(fid), **with_lineup_ids(item)}))
         if details_fetched:
             write(DETAILS / f"{day}.json", file)
     # Vaste pagina's (privacybeleid, support) uit pagina/: Pages wordt elke run helemaal vervangen, dus ze moeten

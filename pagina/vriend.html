@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Weddies – Uitnodiging</title>
+<!-- Uitnodiging voor vrienden in Weddies (2026-10-28). De app deelt https://…/vriend.html?u=<gebruikersnaam>: WhatsApp
+     maakt alleen van https een link. Deze pagina opent de app met weddies://vriend?u=<gebruikersnaam>; daar stuur je een
+     vriendschapsverzoek dat de ander moet accepteren. De pagina bewaart en verstuurt niets. -->
+<style>
+:root{--groen:#033F28;--creme:#F9F5EB;--lijn:#3C6753;--tekst:#1d2a23;--zacht:#55665d;--kaart:#ffffff}
+@media (prefers-color-scheme:dark){:root{--tekst:#eef2ee;--zacht:#a9b8af;--kaart:#0f1f17}}
+*{box-sizing:border-box}
+body{margin:0;font:17px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--tekst);background:var(--creme)}
+@media (prefers-color-scheme:dark){body{background:#07160f}}
+header{background:var(--groen);color:var(--creme);padding:28px 16px 24px;text-align:center}
+header .merk{font-weight:900;letter-spacing:.25em;font-size:15px;opacity:.85}
+header h1{margin:6px 0 0;font-size:26px;line-height:1.25;overflow-wrap:anywhere}
+main{max-width:560px;margin:0 auto;padding:8px 16px 48px}
+.kaart{background:var(--kaart);border-radius:18px;padding:16px 20px 20px;margin-top:16px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.knop{display:block;text-align:center;background:var(--groen);color:var(--creme);text-decoration:none;font-weight:700;
+  padding:14px 16px;border-radius:14px;margin:16px 0 8px}
+.klein{color:var(--zacht);font-size:15px}
+</style>
+</head>
+<body>
+<header><div class="merk">WEDDIES</div><h1 id="kop">Uitnodiging</h1></header>
+<main><div class="kaart">
+<p id="tekst"></p>
+<a class="knop" id="open" href="weddies://vriend">Open in Weddies</a>
+<p class="klein" id="nog"></p>
+</div></main>
+<script>
+(function () {
+  var teksten = {
+    nl: {kop: "@{u} nodigt je uit", tekst: "Word vrienden op Weddies en zie elkaars grounds, badges en wie waar bij is.",
+         open: "Open in Weddies", nog: "Werkt de knop niet? Dan staat Weddies nog niet op deze iPhone. Open deze link op je iPhone met Weddies erop.",
+         fout: "Deze uitnodiging klopt niet."},
+    en: {kop: "@{u} invites you", tekst: "Become friends on Weddies and see each other’s grounds, badges and who’s going where.",
+         open: "Open in Weddies", nog: "Button not working? Then Weddies isn’t on this iPhone yet. Open this link on your iPhone with Weddies on it.",
+         fout: "This invitation isn’t valid."},
+    de: {kop: "@{u} lädt dich ein", tekst: "Werdet Freunde bei Weddies und seht eure Grounds, Badges und wer wo dabei ist.",
+         open: "In Weddies öffnen", nog: "Klappt der Knopf nicht? Dann ist Weddies noch nicht auf diesem iPhone. Öffne den Link auf deinem iPhone mit Weddies.",
+         fout: "Diese Einladung ist ungültig."}
+  };
+  var taal = (navigator.language || "nl").slice(0, 2);
+  var t = teksten[taal] || teksten.en;
+  document.documentElement.lang = teksten[taal] ? taal : "en";
+  var u = (new URLSearchParams(location.search).get("u") || "").toLowerCase().replace(/^@/, "");
+  // Alleen geldige gebruikersnamen (3–20 tekens: letters, cijfers, punt, liggend streepje)
+  if (!/^[a-z0-9_.]{3,20}$/.test(u)) {
+    document.getElementById("kop").textContent = "Weddies";
+    document.getElementById("tekst").textContent = t.fout;
+    document.getElementById("open").style.display = "none";
+    return;
+  }
+  var link = "weddies://vriend?u=" + encodeURIComponent(u);
+  document.getElementById("kop").textContent = t.kop.replace("{u}", u);
+  document.getElementById("tekst").textContent = t.tekst;
+  document.getElementById("nog").textContent = t.nog;
+  var knop = document.getElementById("open");
+  knop.textContent = t.open;
+  knop.href = link;
+  // Meteen proberen de app te openen; lukt dat niet, dan blijft de pagina staan met de knop
+  setTimeout(function () { location.href = link; }, 300);
+})();
+</script>
+</body>
+</html>
