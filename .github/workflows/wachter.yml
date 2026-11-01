@@ -1,0 +1,20 @@
+name: Wachter (Supabase)
+
+# Kijkt elke 30 minuten of de wedstrijddata bij Supabase vers is (scripts/wachter.py). 0 calls bij API-Football.
+# Rood = er is iets mis; GitHub stuurt dan een mail.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kijken:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Is de data bij Supabase vers?
+        run: python3 scripts/wachter.py
