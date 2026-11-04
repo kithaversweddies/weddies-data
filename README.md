@@ -12,7 +12,8 @@ in een eigen compact formaat:
 - `details/<yyyy-mm-dd>.json`: per dag wie er speelde en scoorde (zie hieronder). De volledige versie staat in deze
   repo (`details/`): de Action zet die na het ophalen terug met een commit
 - `wedstrijd/<id>.json`: alles van één gespeelde wedstrijd, voor het wedstrijdscherm (zie hieronder)
-- `privacy.html` en `support.html`: het privacybeleid en de supportpagina van de app (bron: `pagina/`)
+- `privacy-en.html`, `privacy-nl.html`, `privacy-de.html`: het privacybeleid in drie talen; `privacy.html` stuurt door
+  op taal van de browser; `support.html`: de supportpagina (bron: `pagina/`)
 
 Het hele seizoen wordt elke 3 uur ververst; live standen van vandaag elke 5 minuten (alleen als er iets bezig is).
 De stand van een competitie wordt bij die seizoensruns ververst tot ±6 uur nadat er een wedstrijd klaar is.
